@@ -102,18 +102,84 @@ def _jikan_get(path: str, params: dict | None = None, retries: int = 3) -> dict 
     return None
 
 
-def jikan_search_mal_id(anime_name: str) -> int | None:
+def _normalize(s: str) -> str:
+    """Lowercase, strip punctuation/extra spaces — used for title comparison."""
+    s = s.lower()
+    s = re.sub(r"[^\w\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def jikan_search_mal_id(anime_name: str, slug: str = "") -> int | None:
     """
-    Search Jikan for `anime_name` and return the MAL ID of the best match.
-    Returns None if nothing found or the request fails.
+    Search Jikan for anime_name and return the MAL ID of the correct series.
+
+    Strategy:
+    1. Fetch up to 10 TV-type results for the query.
+    2. Prefer any result whose title is an EXACT match (case-insensitive,
+       punctuation-stripped) — TV type wins ties.
+    3. If no exact match, pick the highest-member-count TV result.
+    4. Last resort: first result regardless of type.
+
+    This prevents e.g. "One Piece" returning a movie (MAL:522) instead of
+    the main TV series (MAL:21).
     """
-    data = _jikan_get("anime", params={"q": anime_name, "limit": 1})
-    if not data:
-        return None
-    results = data.get("data", [])
+    query_norm = _normalize(anime_name)
+    slug_norm  = _normalize(slug.replace("-", " ")) if slug else query_norm
+
+    # First try TV-only search (covers most anime on hianime)
+    data = _jikan_get("anime", params={"q": anime_name, "limit": 10, "type": "tv"})
+    results = data.get("data", []) if data else []
+
+    # If TV search returned nothing, retry without type filter
+    if not results:
+        data = _jikan_get("anime", params={"q": anime_name, "limit": 10})
+        results = data.get("data", []) if data else []
+
     if not results:
         return None
-    return results[0].get("mal_id")
+
+    def titles_of(entry: dict) -> list:
+        raw = [
+            entry.get("title", ""),
+            entry.get("title_english", "") or "",
+            entry.get("title_japanese", "") or "",
+        ]
+        for syn in entry.get("titles", []):
+            raw.append(syn.get("title", "") or "")
+        return [_normalize(t) for t in raw if t]
+
+    # Pass 1: exact title match
+    exact_tv, exact_other = [], []
+    for entry in results:
+        norms = titles_of(entry)
+        if query_norm in norms or slug_norm in norms:
+            if entry.get("type", "").upper() == "TV":
+                exact_tv.append(entry)
+            else:
+                exact_other.append(entry)
+
+    if exact_tv:
+        best = max(exact_tv, key=lambda e: e.get("members", 0))
+        print(f"      [Jikan] exact TV match: {best.get('title')!r} -> MAL ID {best['mal_id']}", flush=True)
+        return best["mal_id"]
+
+    if exact_other:
+        best = max(exact_other, key=lambda e: e.get("members", 0))
+        print(f"      [Jikan] exact match (non-TV): {best.get('title')!r} -> MAL ID {best['mal_id']}", flush=True)
+        return best["mal_id"]
+
+    # Pass 2: best TV result by popularity
+    tv_results = [e for e in results if e.get("type", "").upper() == "TV"]
+    if tv_results:
+        best = max(tv_results, key=lambda e: e.get("members", 0))
+        print(f"      [Jikan] best TV result: {best.get('title')!r} -> MAL ID {best['mal_id']}", flush=True)
+        return best["mal_id"]
+
+    # Pass 3: absolute fallback
+    best = results[0]
+    print(f"      [Jikan] fallback: {best.get('title')!r} -> MAL ID {best['mal_id']}", flush=True)
+    return best["mal_id"]
 
 
 def jikan_get_episode_titles(mal_id: int) -> dict[int, str]:
@@ -153,7 +219,7 @@ def get_mal_data_for_slug(slug: str, anime_name: str) -> dict:
         return _MAL_CACHE[slug]
 
     print(f"  [MAL] Searching Jikan for: {anime_name!r}", flush=True)
-    mal_id = jikan_search_mal_id(anime_name)
+    mal_id = jikan_search_mal_id(anime_name, slug=slug)
 
     if mal_id:
         print(f"  [MAL] Found MAL ID: {mal_id}", flush=True)
