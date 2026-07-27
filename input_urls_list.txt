@@ -11,8 +11,8 @@
 # The scraper will skip any URL already in already_processed_urls_list.txt.
 # ─────────────────────────────────────────────────────────────────────────────
 
-https://hianime.ad/watch/one-piece/ep-1161 to 1171
-https://hianime.ad/watch/naruto/ep-1 to 220
-https://hianime.ad/watch/naruto-shippuden/ep-1 to 500
+# https://hianime.ad/watch/one-piece/ep-1161 to 1171
+# https://hianime.ad/watch/naruto/ep-1 to 220
+# https://hianime.ad/watch/naruto-shippuden/ep-1 to 500
 https://hianime.ad/watch/samurai-x/ep-1 to 94
 
