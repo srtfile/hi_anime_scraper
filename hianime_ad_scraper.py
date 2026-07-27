@@ -29,7 +29,6 @@ import math
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import urlparse as _urlparse
 
 try:
     import requests
@@ -505,41 +504,14 @@ def resolve_vibeplayer(embed_url: str) -> dict | None:
 
 def resolve_embed(embed_info: dict) -> dict:
     """Resolve one embed entry to its stream data. Always returns a dict."""
-    if embed_info.get("external"):
-        return {
-            "embed_url":   embed_info["embed_url"],
-            "master_m3u8": None,
-            "variants":    [],
-            "subtitle":    embed_info.get("subtitle"),
-            "external":    True,
-        }
-
-    embed_url = embed_info["embed_url"]
-
-    vp_hash = (
-        embed_url.split("vibeplayer.site/")[-1]
-        if "vibeplayer.site" in embed_url else None
-    )
-    fast_m3u8 = (
-        f"https://vibeplayer.site/public/stream/{vp_hash}/master.m3u8"
-        if vp_hash and not embed_info.get("is_hd2") else None
-    )
-
-    result = resolve_vibeplayer(embed_url)
-    return {
-        "embed_url":   embed_url,
-        "master_m3u8": (result.get("master_m3u8") if result else None) or fast_m3u8,
-        "variants":    result.get("variants", []) if result else [],
-        "subtitle":    (result.get("subtitle") if result else None) or embed_info.get("subtitle"),
-        "external":    False,
-    }
+    return {"embed_url": embed_info["embed_url"]}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SINGLE EPISODE SCRAPE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
+def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:  # resolve_streams kept for CLI compat
     """
     Scrape one episode URL and return a record dict.
 
@@ -549,32 +521,17 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
       "episode_url":    "https://hianime.ad/watch/naruto/ep-1",
       "slug":           "naruto",
       "anime_name":     "Naruto",
-      "mal_id":         20,               ← MAL ID (int or null)
+      "mal_id":         20,
       "episode_number": 1,
-      "episode_title":  "Enter: Naruto Uzumaki!",   ← from Jikan (or null)
+      "episode_title":  "Enter: Naruto Uzumaki!",
       "scraped_at":     "2026-07-27T10:00:00+00:00",
       "embeds": {
-        "sub": {
-          "HD-1": {
-            "embed_url":   "…",
-            "master_m3u8": "…",
-            "variants":    […],
-            "stream_keys": {
-              "url_key":  "20-malep-1_vibeplayer_sub",
-              "m3u8_key": "20-malep-1_vibeplayer_sub_m3u8"
-            }
-          }
-        },
-        "dub": { … },
+        "sub":  { "HD-1": {"embed_url": "…"} },
+        "dub":  { "HD-1": {"embed_url": "…"} },
+        "hsub": { "StreamHG": {"embed_url": "…"}, "Earnvids": {"embed_url": "…"} }
       },
       "error": null
     }
-
-    stream_keys follow the same naming convention as vibeplayer_site.py so
-    both scrapers produce compatible output:
-        {mal_id}-malep-{ep_num}_{domain_clean}_{server_type}
-        {mal_id}-malep-{ep_num}_{domain_clean}_{server_type}_m3u8
-    When mal_id is None the prefix is just "malep-{ep_num}".
     """
     slug     = get_slug(ep_url)
     ep_num   = get_ep_num(ep_url)
@@ -588,9 +545,6 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
 
     # Episode title from Jikan, fall back to None
     ep_title = jikan_eps.get(ep_num) if ep_num else None
-
-    # Key prefix mirrors vibeplayer_site.py convention
-    mal_ep_prefix = f"{mal_id}-malep-{ep_num}" if mal_id else f"malep-{ep_num}"
 
     record: dict = {
         "episode_url":    ep_url,
@@ -610,42 +564,9 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
         for server_type, servers in embeds_raw.items():
             record["embeds"].setdefault(server_type, {})
             for label, embed_info in servers.items():
-                # Build the MAL-keyed stream_keys for this embed
-                embed_url    = embed_info["embed_url"]
-                _domain      = _urlparse(embed_url).netloc.replace("www.", "")
-                _domain_clean = re.sub(r'\.(site|online|com|net|org|ad)$', '', _domain).replace(".", "_")
-                url_key  = f"{mal_ep_prefix}_{_domain_clean}_{server_type}"
-                m3u8_key = f"{mal_ep_prefix}_{_domain_clean}_{server_type}_m3u8"
+                embed_url = embed_info["embed_url"]
 
-                if resolve_streams:
-                    resolved = resolve_embed(embed_info)
-                    record["embeds"][server_type][label] = {
-                        **resolved,
-                        "stream_keys": {
-                            "url_key":  url_key,
-                            "m3u8_key": m3u8_key,
-                        },
-                    }
-                else:
-                    # Fast mode: embed URL + derived m3u8 only, no HTTP to vibeplayer
-                    vp_hash = (
-                        embed_url.split("vibeplayer.site/")[-1]
-                        if "vibeplayer.site" in embed_url else None
-                    )
-                    record["embeds"][server_type][label] = {
-                        "embed_url":   embed_url,
-                        "master_m3u8": (
-                            f"https://vibeplayer.site/public/stream/{vp_hash}/master.m3u8"
-                            if vp_hash and not embed_info.get("is_hd2") else None
-                        ),
-                        "variants":    [],
-                        "subtitle":    embed_info.get("subtitle"),
-                        "external":    embed_info.get("external", False),
-                        "stream_keys": {
-                            "url_key":  url_key,
-                            "m3u8_key": m3u8_key,
-                        },
-                    }
+                record["embeds"][server_type][label] = {"embed_url": embed_url}
 
         counts = "  ".join(
             f"{st.upper()}:{len(sv)}" for st, sv in record["embeds"].items()
