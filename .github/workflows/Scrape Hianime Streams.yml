@@ -161,10 +161,6 @@ jobs:
             echo "=== run_summary.json ==="
             cat run_summary.json
             echo ""
-            REMAINING=$(python3 -c "import json; d=json.load(open('run_summary.json')); print(d.get('remaining',0))")
-            echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
-          else
-            echo "remaining=0" >> "$GITHUB_OUTPUT"
           fi
 
       # ── 6. Commit results back to the repo ────────────────────────────────
@@ -194,31 +190,7 @@ jobs:
             echo "[✓] Results committed and pushed"
           fi
 
-      # ── 7. Auto-trigger next batch if URLs remain ─────────────────────────
-      - name: Trigger next batch
-        if: |
-          steps.check.outputs.pending != '0' &&
-          steps.scrape.outputs.remaining != '0' &&
-          steps.scrape.outputs.remaining != ''
-        env:
-          GH_TOKEN: ${{ secrets.SCRAPE_TOKEN }}
-        run: |
-          REMAINING="${{ steps.scrape.outputs.remaining }}"
-          BATCH="${{ steps.batch.outputs.value }}"
-
-          echo "[*] $REMAINING URL(s) still pending."
-          echo "[*] Waiting 5 minutes, then triggering next batch..."
-          sleep 300
-
-          gh workflow run scrape.yml \
-            --repo "${{ github.repository }}" \
-            --ref  "${{ github.ref_name }}" \
-            --field batch_size="$BATCH" \
-            --field delay="${{ github.event.inputs.delay || '1.0' }}" \
-            && echo "[✓] Next batch queued." \
-            || echo "[!] Could not self-trigger — the 30-min cron will resume the chain."
-
-      # ── 8. Final status ────────────────────────────────────────────────────
+      # ── 7. Final status ────────────────────────────────────────────────────
       - name: Print final status
         if: always()
         run: |
@@ -231,7 +203,6 @@ jobs:
           print(f"  OK       : {d.get('ok',        0)}")
           print(f"  Errors   : {d.get('errors',    0)}")
           print(f"  Total    : {d.get('total',      0)}")
-          print(f"  Remaining: {d.get('remaining',  0)}")
           print(f"  Outputs  : {', '.join(d.get('outputs', []))}")
           print(f"  At       : {d.get('timestamp', '?')}")
           PYEOF
