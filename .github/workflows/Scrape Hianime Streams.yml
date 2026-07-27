@@ -2,8 +2,8 @@ name: Scrape Hianime Streams
 
 on:
   # ── Scheduled: auto-resume every 30 min if URLs are still pending ────────
- # schedule:
-   # - cron: '*/30 * * * *'
+  # schedule:
+  #   - cron: '*/30 * * * *'
 
   # ── Manual trigger with full control ─────────────────────────────────────
   workflow_dispatch:
@@ -31,15 +31,6 @@ on:
         required: false
         type: string
 
-      no_streams:
-        description: 'Skip m3u8 resolution (embed URLs only — much faster)'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-
       delay:
         description: 'Seconds to wait between episode requests (default: 1.0)'
         required: false
@@ -54,7 +45,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 340       # just under GitHub's 6-hour job limit
+    timeout-minutes: 340
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
@@ -62,7 +53,6 @@ jobs:
         uses: actions/checkout@v4.2.2
         with:
           token: ${{ secrets.SCRAPE_TOKEN }}
-          # Fetch full history so git push works cleanly
           fetch-depth: 0
 
       # ── 2. Python setup ────────────────────────────────────────────────────
@@ -74,11 +64,10 @@ jobs:
       - name: Install dependencies
         run: pip install --upgrade pip requests
 
-      # ── 3. Decide batch mode ───────────────────────────────────────────────
+      # ── 3. Decide batch size ───────────────────────────────────────────────
       - name: Resolve batch size
         id: batch
         run: |
-          # Scheduled runs use first_100; manual runs use chosen value
           if [ "${{ github.event_name }}" = "schedule" ]; then
             echo "value=first_100" >> "$GITHUB_OUTPUT"
           else
@@ -87,13 +76,12 @@ jobs:
             echo "value=$BATCH" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── 4. Check if there is anything to do ───────────────────────────────
+      # ── 4. Check pending URLs ──────────────────────────────────────────────
       - name: Check pending URLs
         id: check
         run: |
-          # Count pending = total_input_urls - already_processed
           python3 - <<'PYEOF'
-          import re, sys
+          import re, sys, os
           from pathlib import Path
 
           input_file     = Path("input_urls_list.txt")
@@ -101,9 +89,8 @@ jobs:
 
           if not input_file.exists():
               print("[!] input_urls_list.txt not found — nothing to do")
-              print("pending=0", flush=True)
-              with open("$GITHUB_ENV", "a") as f:
-                  f.write("PENDING_COUNT=0\n")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("pending=0\n")
               sys.exit(0)
 
           def expand(line):
@@ -118,8 +105,7 @@ jobs:
                   return [m.group(1)]
               return []
 
-          all_urls = []
-          seen = set()
+          all_urls, seen = [], set()
           for raw in input_file.read_text(encoding="utf-8").splitlines():
               for u in expand(raw):
                   if u not in seen:
@@ -134,17 +120,13 @@ jobs:
                       processed.add(ln)
 
           inline = """${{ github.event.inputs.inline_urls }}""".strip()
-          if inline:
-              # Inline URLs bypass the processed check — they're always fresh
-              pending_count = len(all_urls)   # just show total; scraper handles dedup
-          else:
-              pending_count = len([u for u in all_urls if u not in processed])
+          pending_count = len(all_urls) if inline else len([u for u in all_urls if u not in processed])
 
           print(f"[+] Total input URLs : {len(all_urls)}")
           print(f"[+] Already processed: {len(processed)}")
           print(f"[+] Pending          : {pending_count}")
 
-          with open(f"{__import__('os').environ['GITHUB_OUTPUT']}", "a") as f:
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"pending={pending_count}\n")
           PYEOF
 
@@ -156,17 +138,11 @@ jobs:
           SCRAPE_DELAY: ${{ github.event.inputs.delay || '1.0' }}
         run: |
           BATCH="${{ steps.batch.outputs.value }}"
-          NO_STREAMS="${{ github.event.inputs.no_streams }}"
           INLINE="${{ github.event.inputs.inline_urls }}"
 
           ARGS="--batch $BATCH --delay ${SCRAPE_DELAY:-1.0}"
 
-          if [ "$NO_STREAMS" = "true" ]; then
-            ARGS="$ARGS --no-streams"
-          fi
-
           if [ -n "$INLINE" ]; then
-            # Write inline URLs to a temp file and pass via --input
             echo "$INLINE" > /tmp/inline_urls.txt
             ARGS="$ARGS --input /tmp/inline_urls.txt"
           fi
@@ -174,13 +150,11 @@ jobs:
           echo "[*] Running: python3 hianime_ad_scraper.py $ARGS"
           echo ""
 
-          # Capture exit code without letting it abort the whole step
           set +e
           python3 hianime_ad_scraper.py $ARGS
           EXIT_CODE=$?
           set -e
 
-          echo ""
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
           if [ -f run_summary.json ]; then
@@ -200,7 +174,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Stage all output files
           git add hianime_streams_list*.json  2>/dev/null || true
           git add already_processed_urls_list.txt 2>/dev/null || true
           git add run_summary.json 2>/dev/null || true
@@ -211,9 +184,9 @@ jobs:
             TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
             SUMMARY=""
             if [ -f run_summary.json ]; then
-              OK=$(python3      -c "import json; print(json.load(open('run_summary.json')).get('ok',      0))")
-              ERRORS=$(python3  -c "import json; print(json.load(open('run_summary.json')).get('errors',  0))")
-              TOTAL=$(python3   -c "import json; print(json.load(open('run_summary.json')).get('total',   0))")
+              OK=$(python3     -c "import json; print(json.load(open('run_summary.json')).get('ok',     0))")
+              ERRORS=$(python3 -c "import json; print(json.load(open('run_summary.json')).get('errors', 0))")
+              TOTAL=$(python3  -c "import json; print(json.load(open('run_summary.json')).get('total',  0))")
               SUMMARY=" | ${OK} OK / ${ERRORS} err / ${TOTAL} total"
             fi
             git commit -m "scrape: ${TIMESTAMP}${SUMMARY}"
@@ -241,7 +214,6 @@ jobs:
             --repo "${{ github.repository }}" \
             --ref  "${{ github.ref_name }}" \
             --field batch_size="$BATCH" \
-            --field no_streams="${{ github.event.inputs.no_streams || 'false' }}" \
             --field delay="${{ github.event.inputs.delay || '1.0' }}" \
             && echo "[✓] Next batch queued." \
             || echo "[!] Could not self-trigger — the 30-min cron will resume the chain."
@@ -256,12 +228,12 @@ jobs:
             python3 - <<'PYEOF'
           import json
           d = json.load(open("run_summary.json"))
-          print(f"  OK       : {d.get('ok', 0)}")
-          print(f"  Errors   : {d.get('errors', 0)}")
-          print(f"  Total    : {d.get('total', 0)}")
-          print(f"  Remaining: {d.get('remaining', 0)}")
+          print(f"  OK       : {d.get('ok',        0)}")
+          print(f"  Errors   : {d.get('errors',    0)}")
+          print(f"  Total    : {d.get('total',      0)}")
+          print(f"  Remaining: {d.get('remaining',  0)}")
           print(f"  Outputs  : {', '.join(d.get('outputs', []))}")
-          print(f"  At       : {d.get('timestamp','?')}")
+          print(f"  At       : {d.get('timestamp', '?')}")
           PYEOF
           else
             echo "  No run_summary.json (scraper may have been skipped)"
