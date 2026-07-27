@@ -343,7 +343,6 @@ def scrape_episode(ep_url: str) -> dict:
       "hsub_earnvids_embed_url_ep_1": "https://otakuvid.online/embed/…",
       "sub_hd1_embed_url_ep_1":       "https://vibeplayer.site/…",
       ...
-      "error": null
     }
     """
     global _SERIAL
@@ -357,7 +356,6 @@ def scrape_episode(ep_url: str) -> dict:
         "serial_no":   _SERIAL,
         "episode_url": ep_url,
         "anime_name":  anime,
-        "error":       None,
     }
 
     try:
@@ -373,7 +371,6 @@ def scrape_episode(ep_url: str) -> dict:
         print(f"  [OK] ep-{ep_num}  {len(flat)} embed(s)", flush=True)
 
     except Exception as exc:
-        record["error"] = str(exc)
         print(f"  [!!] ep-{ep_num} FAILED: {exc}", flush=True)
 
     return record
@@ -459,10 +456,11 @@ def run(
         out.add(record)
         mark_processed(processed_path, ep_url)
 
-        if record.get("error"):
-            er_count += 1
-        else:
+        embed_keys = [k for k in record if k.endswith("_embed_url_ep_" + str(get_ep_num(ep_url)))]
+        if embed_keys:
             ok_count += 1
+        else:
+            er_count += 1
 
         if i < total:
             time.sleep(delay)
