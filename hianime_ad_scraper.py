@@ -5,6 +5,9 @@ GitHub Actions-compatible scraper for hianime.ad / vibeplayer.site.
 Reads input_urls_list.txt, scrapes episode stream data, saves results
 locally in the repo (committed back to GitHub by the workflow).
 
+MAL ID is fetched automatically from the Jikan API (api.jikan.moe/v4)
+and embedded in every record and episode key.
+
 Input file  : input_urls_list.txt
 Processed   : already_processed_urls_list.txt
 Output      : hianime_streams_list.json  (auto-splits at 3 MB →
@@ -26,6 +29,7 @@ import math
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import urlparse as _urlparse
 
 try:
     import requests
@@ -42,6 +46,12 @@ OUTPUT_STEM       = "hianime_streams_list"
 MAX_OUTPUT_BYTES  = 3 * 1024 * 1024          # 3 MB hard cap per file
 REQUEST_TIMEOUT   = 20
 INTER_EP_DELAY    = float(os.environ.get("SCRAPE_DELAY", "1.0"))
+
+# Jikan (MAL) API base — free, no key required
+JIKAN_BASE        = "https://api.jikan.moe/v4"
+# Cache: slug → {"mal_id": int|None, "jikan_episodes": {ep_num: title}}
+# Avoids hitting Jikan more than once per series in a single run.
+_MAL_CACHE: dict  = {}
 
 
 # ─── HTTP session ─────────────────────────────────────────────────────────────
@@ -62,8 +72,107 @@ M3U8_HEADERS = {"User-Agent": _UA, "Referer": "https://vibeplayer.site/"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# JIKAN / MAL HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _jikan_get(path: str, params: dict | None = None, retries: int = 3) -> dict | None:
+    """
+    GET https://api.jikan.moe/v4/<path> with retry + rate-limit handling.
+    Jikan allows ~3 req/s; we sleep briefly after every call.
+    """
+    url = f"{JIKAN_BASE}/{path}"
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, params=params, timeout=15)
+            if r.status_code == 200:
+                time.sleep(0.4)          # stay well under the 3 req/s cap
+                return r.json()
+            if r.status_code == 429:
+                wait = int(r.headers.get("Retry-After", 2 * attempt))
+                print(f"      [Jikan] 429 — waiting {wait}s …", flush=True)
+                time.sleep(wait)
+                continue
+            if r.status_code in (500, 503):
+                time.sleep(2 * attempt)
+                continue
+            print(f"      [Jikan] HTTP {r.status_code} for {url}", flush=True)
+            return None
+        except Exception as e:
+            print(f"      [Jikan] request error (attempt {attempt}): {e}", flush=True)
+            time.sleep(2)
+    return None
+
+
+def jikan_search_mal_id(anime_name: str) -> int | None:
+    """
+    Search Jikan for `anime_name` and return the MAL ID of the best match.
+    Returns None if nothing found or the request fails.
+    """
+    data = _jikan_get("anime", params={"q": anime_name, "limit": 1})
+    if not data:
+        return None
+    results = data.get("data", [])
+    if not results:
+        return None
+    return results[0].get("mal_id")
+
+
+def jikan_get_episode_titles(mal_id: int) -> dict[int, str]:
+    """
+    Fetch all episode titles from Jikan for the given MAL ID.
+    Returns {episode_number: title_str}.  May be empty if MAL has no episode list.
+    Handles multi-page responses automatically.
+    """
+    titles: dict[int, str] = {}
+    page = 1
+    while True:
+        data = _jikan_get(f"anime/{mal_id}/episodes", params={"page": page})
+        if not data:
+            break
+        for ep in data.get("data", []):
+            ep_num = ep.get("mal_id")      # Jikan uses mal_id as episode number here
+            title  = ep.get("title") or ep.get("title_romanji") or ""
+            if ep_num and title:
+                titles[int(ep_num)] = title
+        pagination = data.get("pagination", {})
+        if not pagination.get("has_next_page"):
+            break
+        page += 1
+        time.sleep(0.4)
+    return titles
+
+
+def get_mal_data_for_slug(slug: str, anime_name: str) -> dict:
+    """
+    Return a dict with 'mal_id' (int|None) and 'jikan_episodes' ({ep_num: title})
+    for the given slug.  Results are cached so each series is only fetched once
+    per process.
+
+    Cache key is the slug (stable) rather than the anime_name (can vary by URL).
+    """
+    if slug in _MAL_CACHE:
+        return _MAL_CACHE[slug]
+
+    print(f"  [MAL] Searching Jikan for: {anime_name!r}", flush=True)
+    mal_id = jikan_search_mal_id(anime_name)
+
+    if mal_id:
+        print(f"  [MAL] Found MAL ID: {mal_id}", flush=True)
+        time.sleep(0.5)
+        print(f"  [MAL] Fetching episode titles (MAL ID {mal_id}) …", flush=True)
+        jikan_eps = jikan_get_episode_titles(mal_id)
+        print(f"  [MAL] Got {len(jikan_eps)} episode title(s) from Jikan", flush=True)
+    else:
+        print(f"  [MAL] MAL ID not found for {anime_name!r}", flush=True)
+        jikan_eps = {}
+
+    result = {"mal_id": mal_id, "jikan_episodes": jikan_eps}
+    _MAL_CACHE[slug] = result
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # INPUT PARSING
-# Parse "ep-N to M" ranges and single "ep-N" entries from the input file.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def expand_line(line: str) -> list[str]:
@@ -172,8 +281,6 @@ class OutputManager:
         self._records: list[dict] = []
         self._resume()
 
-    # ── internal helpers ──────────────────────────────────────────────────────
-
     def _chunk_path(self, n: int) -> Path:
         name = self.stem if n == 1 else f"{self.stem}_{n}"
         return self.base_dir / f"{name}.json"
@@ -212,8 +319,6 @@ class OutputManager:
             )
         except Exception:
             self._records = []
-
-    # ── public ────────────────────────────────────────────────────────────────
 
     def add(self, record: dict) -> None:
         """Append a record; roll over to next chunk file if needed."""
@@ -265,6 +370,11 @@ def get_slug(url: str) -> str | None:
 def get_ep_num(url: str) -> int | None:
     m = re.search(r'/ep-(\d+)', url)
     return int(m.group(1)) if m else None
+
+
+def slug_to_anime_name(slug: str) -> str:
+    """Convert a URL slug to a readable anime name for Jikan searching."""
+    return slug.replace("-", " ").title()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -406,7 +516,6 @@ def resolve_embed(embed_info: dict) -> dict:
 
     embed_url = embed_info["embed_url"]
 
-    # Fast-path: derive stream URL from vibeplayer hash without fetching the page
     vp_hash = (
         embed_url.split("vibeplayer.site/")[-1]
         if "vibeplayer.site" in embed_url else None
@@ -439,23 +548,57 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
     {
       "episode_url":    "https://hianime.ad/watch/naruto/ep-1",
       "slug":           "naruto",
+      "anime_name":     "Naruto",
+      "mal_id":         20,               ← MAL ID (int or null)
       "episode_number": 1,
+      "episode_title":  "Enter: Naruto Uzumaki!",   ← from Jikan (or null)
       "scraped_at":     "2026-07-27T10:00:00+00:00",
       "embeds": {
-        "sub":  { "HD-1": {"embed_url": ..., "master_m3u8": ..., "variants": [...], ...} },
-        "dub":  { … },
+        "sub": {
+          "HD-1": {
+            "embed_url":   "…",
+            "master_m3u8": "…",
+            "variants":    […],
+            "stream_keys": {
+              "url_key":  "20-malep-1_vibeplayer_sub",
+              "m3u8_key": "20-malep-1_vibeplayer_sub_m3u8"
+            }
+          }
+        },
+        "dub": { … },
       },
       "error": null
     }
+
+    stream_keys follow the same naming convention as vibeplayer_site.py so
+    both scrapers produce compatible output:
+        {mal_id}-malep-{ep_num}_{domain_clean}_{server_type}
+        {mal_id}-malep-{ep_num}_{domain_clean}_{server_type}_m3u8
+    When mal_id is None the prefix is just "malep-{ep_num}".
     """
-    slug   = get_slug(ep_url)
-    ep_num = get_ep_num(ep_url)
-    now    = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    slug     = get_slug(ep_url)
+    ep_num   = get_ep_num(ep_url)
+    now      = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # ── MAL lookup (cached per slug) ─────────────────────────────────────────
+    anime_name = slug_to_anime_name(slug) if slug else "Unknown"
+    mal_data   = get_mal_data_for_slug(slug, anime_name) if slug else {"mal_id": None, "jikan_episodes": {}}
+    mal_id     = mal_data["mal_id"]
+    jikan_eps  = mal_data["jikan_episodes"]
+
+    # Episode title from Jikan, fall back to None
+    ep_title = jikan_eps.get(ep_num) if ep_num else None
+
+    # Key prefix mirrors vibeplayer_site.py convention
+    mal_ep_prefix = f"{mal_id}-malep-{ep_num}" if mal_id else f"malep-{ep_num}"
 
     record: dict = {
         "episode_url":    ep_url,
         "slug":           slug,
+        "anime_name":     anime_name,
+        "mal_id":         mal_id,
         "episode_number": ep_num,
+        "episode_title":  ep_title,
         "scraped_at":     now,
         "embeds":         {},
         "error":          None,
@@ -467,16 +610,30 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
         for server_type, servers in embeds_raw.items():
             record["embeds"].setdefault(server_type, {})
             for label, embed_info in servers.items():
+                # Build the MAL-keyed stream_keys for this embed
+                embed_url    = embed_info["embed_url"]
+                _domain      = _urlparse(embed_url).netloc.replace("www.", "")
+                _domain_clean = re.sub(r'\.(site|online|com|net|org|ad)$', '', _domain).replace(".", "_")
+                url_key  = f"{mal_ep_prefix}_{_domain_clean}_{server_type}"
+                m3u8_key = f"{mal_ep_prefix}_{_domain_clean}_{server_type}_m3u8"
+
                 if resolve_streams:
-                    record["embeds"][server_type][label] = resolve_embed(embed_info)
+                    resolved = resolve_embed(embed_info)
+                    record["embeds"][server_type][label] = {
+                        **resolved,
+                        "stream_keys": {
+                            "url_key":  url_key,
+                            "m3u8_key": m3u8_key,
+                        },
+                    }
                 else:
                     # Fast mode: embed URL + derived m3u8 only, no HTTP to vibeplayer
                     vp_hash = (
-                        embed_info["embed_url"].split("vibeplayer.site/")[-1]
-                        if "vibeplayer.site" in embed_info["embed_url"] else None
+                        embed_url.split("vibeplayer.site/")[-1]
+                        if "vibeplayer.site" in embed_url else None
                     )
                     record["embeds"][server_type][label] = {
-                        "embed_url":   embed_info["embed_url"],
+                        "embed_url":   embed_url,
                         "master_m3u8": (
                             f"https://vibeplayer.site/public/stream/{vp_hash}/master.m3u8"
                             if vp_hash and not embed_info.get("is_hd2") else None
@@ -484,12 +641,17 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
                         "variants":    [],
                         "subtitle":    embed_info.get("subtitle"),
                         "external":    embed_info.get("external", False),
+                        "stream_keys": {
+                            "url_key":  url_key,
+                            "m3u8_key": m3u8_key,
+                        },
                     }
 
         counts = "  ".join(
             f"{st.upper()}:{len(sv)}" for st, sv in record["embeds"].items()
         )
-        print(f"  [OK] ep-{ep_num}  {counts}", flush=True)
+        mal_tag = f"MAL:{mal_id}" if mal_id else "MAL:?"
+        print(f"  [OK] ep-{ep_num}  {counts}  {mal_tag}", flush=True)
 
     except Exception as exc:
         record["error"] = str(exc)
@@ -500,7 +662,6 @@ def scrape_episode(ep_url: str, resolve_streams: bool = True) -> dict:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BATCH SELECTION
-# Mirrors the batch_size logic in capture.yml so both are consistent.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def select_batch(pending: list[str], batch: str) -> list[str]:
@@ -516,7 +677,6 @@ def select_batch(pending: list[str], batch: str) -> list[str]:
             return pending[:n]
         except ValueError:
             pass
-    # Try plain integer
     try:
         return pending[: int(batch)]
     except ValueError:
@@ -544,12 +704,12 @@ def run(
     ─────
     1. Subtract already-processed URLs
     2. Apply batch limit
-    3. Scrape each episode
+    3. Scrape each episode (MAL ID fetched once per series, cached)
     4. Append record to output JSON (auto-split at 3 MB)
     5. Mark URL as processed
     """
     print("=" * 65, flush=True)
-    print("  hianime.ad  —  Stream Scraper", flush=True)
+    print("  hianime.ad  —  Stream Scraper  (with MAL ID)", flush=True)
     print("=" * 65, flush=True)
     print(flush=True)
 
@@ -571,7 +731,7 @@ def run(
         print("[✓] All URLs already processed. Nothing to do.", flush=True)
         return 0
 
-    selected = select_batch(pending, batch)
+    selected  = select_batch(pending, batch)
     remaining = len(pending) - len(selected)
     print(f"[*] Batch '{batch}': running {len(selected)} URL(s)", flush=True)
     if remaining > 0:
@@ -614,7 +774,6 @@ def run(
     print(f"Processed log : {processed_path}", flush=True)
     print("=" * 65, flush=True)
 
-    # Write a machine-readable summary for the workflow to read
     summary_path = output_dir / "run_summary.json"
     summary_path.write_text(
         json.dumps({
@@ -666,9 +825,19 @@ def main() -> None:
         "--no-streams", action="store_true",
         help="Skip m3u8 resolution — only collect embed URLs (much faster)",
     )
+    parser.add_argument(
+        "--no-mal", action="store_true",
+        help="Skip Jikan/MAL lookup entirely (faster, mal_id will be null)",
+    )
     args = parser.parse_args()
 
-    # Build URL list
+    # Patch: if --no-mal, replace the lookup function with a no-op
+    if args.no_mal:
+        global get_mal_data_for_slug
+        def get_mal_data_for_slug(slug, anime_name):   # noqa: F811
+            return {"mal_id": None, "jikan_episodes": {}}
+        print("[*] MAL lookup disabled (--no-mal)", flush=True)
+
     if args.url:
         all_urls = parse_inline_urls(args.url)
     else:
