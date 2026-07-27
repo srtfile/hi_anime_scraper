@@ -13,6 +13,7 @@ Output      : hianime_streams_list.json  (auto-splits at 3 MB →
 Output record format:
   {
     "serial_no":                    1,
+    "mal_id/anilist_id/tmdb_id":    null,          ← fill in manually later
     "episode_url":                  "https://hianime.ad/watch/one-piece/ep-1",
     "anime_name":                   "One Piece",
     "hsub_streamhg_embed_url_ep_1": "https://otakuhg.site/e/…",
@@ -25,6 +26,11 @@ Output record format:
   All data-video="…" URLs found on the page are captured — including any
   new or unknown streaming hosts — via a catch-all pass after the known
   domain patterns. Keys for unknown hosts are derived from their domain name.
+
+  After every run the JSON output is automatically sorted by anime slug
+  (alphabetical) then by episode number (ascending), and serial_no is
+  re-assigned to match the new order.  Existing chunk files are rewritten
+  in-place so git diff only shows the new records.
 
 Usage:
   python hianime_scraper.py --batch 50
@@ -383,6 +389,7 @@ def scrape_episode(ep_url: str) -> dict:
     Output shape:
     {
       "serial_no":                    1,
+      "mal_id/anilist_id/tmdb_id":    null,
       "episode_url":                  "https://hianime.ad/watch/one-piece/ep-1",
       "anime_name":                   "One Piece",
       "hsub_streamhg_embed_url_ep_1": "https://otakuhg.site/e/…",
@@ -399,9 +406,10 @@ def scrape_episode(ep_url: str) -> dict:
     anime    = slug_to_anime_name(slug) if slug else "Unknown"
 
     record: dict = {
-        "serial_no":   _SERIAL,
-        "episode_url": ep_url,
-        "anime_name":  anime,
+        "serial_no":              _SERIAL,
+        "mal_id/anilist_id/tmdb_id": None,   # fill in manually or via API later
+        "episode_url":            ep_url,
+        "anime_name":             anime,
     }
 
     try:
@@ -444,6 +452,107 @@ def select_batch(pending: list[str], batch: str) -> list[str]:
         pass
     print(f"  [!] Unknown batch '{batch}', running all", flush=True)
     return pending
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POST-RUN SORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def sort_output_files(output_dir: Path, stem: str, max_bytes: int) -> list[Path]:
+    """
+    After a run completes, collect every record from all chunk files, sort them
+    by anime slug then by episode number, re-assign serial_no, re-split into
+    ≤max_bytes chunks, and write them back.
+
+    Sort order
+    ──────────
+    Primary  : anime slug extracted from episode_url  (alphabetical)
+               e.g.  /watch/one-piece/ep-5  → "one-piece"
+    Secondary: episode number (numeric ascending)
+               e.g.  ep-5  →  5
+
+    Returns the list of output paths that were written.
+    """
+
+    def _chunk_path(n: int) -> Path:
+        name = stem if n == 1 else f"{stem}_{n}"
+        return output_dir / f"{name}.json"
+
+    # ── 1. Collect all existing records ───────────────────────────────────────
+    all_records: list[dict] = []
+    n = 1
+    while _chunk_path(n).exists():
+        try:
+            data = json.loads(_chunk_path(n).read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                all_records.extend(data)
+        except Exception as exc:
+            print(f"  [!] sort: could not read {_chunk_path(n).name}: {exc}", flush=True)
+        n += 1
+
+    if not all_records:
+        print("[*] sort: no records found — skipping sort", flush=True)
+        return []
+
+    # ── 2. Sort ───────────────────────────────────────────────────────────────
+    def _sort_key(rec: dict) -> tuple:
+        url  = rec.get("episode_url", "")
+        slug_m = re.search(r'/watch/([^/]+)/ep-', url)
+        ep_m   = re.search(r'/ep-(\d+)', url)
+        slug   = slug_m.group(1) if slug_m else ""
+        ep_num = int(ep_m.group(1)) if ep_m else 0
+        return (slug, ep_num)
+
+    all_records.sort(key=_sort_key)
+
+    # ── 3. Re-assign serial_no (1-based, contiguous after sort) ───────────────
+    for idx, rec in enumerate(all_records, 1):
+        rec["serial_no"] = idx
+
+    # ── 4. Re-split into chunks and write ─────────────────────────────────────
+    def _encode(recs: list) -> bytes:
+        return json.dumps(recs, indent=2, ensure_ascii=False).encode("utf-8")
+
+    # Delete old chunk files first so stale extras don't linger
+    old_n = 1
+    while _chunk_path(old_n).exists():
+        _chunk_path(old_n).unlink()
+        old_n += 1
+
+    chunk_num   = 1
+    chunk_recs: list[dict] = []
+    written:    list[Path] = []
+
+    for rec in all_records:
+        if chunk_recs and len(_encode(chunk_recs + [rec])) > max_bytes:
+            p = _chunk_path(chunk_num)
+            p.write_bytes(_encode(chunk_recs))
+            written.append(p)
+            print(
+                f"  [sort] wrote {p.name}  ({p.stat().st_size // 1024} KB, "
+                f"{len(chunk_recs)} records)",
+                flush=True,
+            )
+            chunk_num += 1
+            chunk_recs = []
+        chunk_recs.append(rec)
+
+    if chunk_recs:
+        p = _chunk_path(chunk_num)
+        p.write_bytes(_encode(chunk_recs))
+        written.append(p)
+        print(
+            f"  [sort] wrote {p.name}  ({p.stat().st_size // 1024} KB, "
+            f"{len(chunk_recs)} records)",
+            flush=True,
+        )
+
+    print(
+        f"[✓] Sort complete — {len(all_records)} records across "
+        f"{len(written)} file(s), grouped by anime then episode",
+        flush=True,
+    )
+    return written
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -517,8 +626,20 @@ def run(
     if remaining > 0:
         print(f"[*] {remaining} URL(s) still pending — next run will continue", flush=True)
     print(flush=True)
+
+    # ── Sort all output files by anime slug then episode number ───────────────
+    print("[*] Sorting output by anime → episode …", flush=True)
+    sorted_paths = sort_output_files(output_dir, OUTPUT_STEM, MAX_OUTPUT_BYTES)
+    final_paths  = sorted_paths if sorted_paths else out.all_output_paths()
+
+    print(flush=True)
     print("Output files:", flush=True)
-    print(out.summary(), flush=True)
+    for p in final_paths:
+        try:
+            cnt = len(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:
+            cnt = "?"
+        print(f"  {p.name}  ({p.stat().st_size // 1024} KB, {cnt} records)", flush=True)
     print(flush=True)
     print(f"Processed log : {processed_path}", flush=True)
     print("=" * 65, flush=True)
@@ -530,7 +651,7 @@ def run(
             "errors":    er_count,
             "total":     total,
             "remaining": remaining,
-            "outputs":   [str(p.name) for p in out.all_output_paths()],
+            "outputs":   [str(p.name) for p in final_paths],
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }, indent=2),
         encoding="utf-8",
