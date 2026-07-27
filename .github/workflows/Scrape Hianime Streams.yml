@@ -171,12 +171,12 @@ jobs:
             ARGS="$ARGS --input /tmp/inline_urls.txt"
           fi
 
-          echo "[*] Running: python3 hianime_scraper.py $ARGS"
+          echo "[*] Running: python3 hianime_ad_scraper.py $ARGS"
           echo ""
 
           # Capture exit code without letting it abort the whole step
           set +e
-          python3 hianime_scraper.py $ARGS
+          python3 hianime_ad_scraper.py $ARGS
           EXIT_CODE=$?
           set -e
 
