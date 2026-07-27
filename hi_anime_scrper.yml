@@ -1,0 +1,269 @@
+name: Scrape Hianime Streams
+
+on:
+  # ── Scheduled: auto-resume every 30 min if URLs are still pending ────────
+  schedule:
+    - cron: '*/30 * * * *'
+
+  # ── Manual trigger with full control ─────────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: |
+          How many pending URLs to process this run.
+            first_10 / first_50 / first_100 / first_250 / half / all
+        required: false
+        default: 'first_100'
+        type: choice
+        options:
+          - first_10
+          - first_50
+          - first_100
+          - first_250
+          - half
+          - all
+
+      inline_urls:
+        description: |
+          Optional: paste URLs directly (one per line, ranges supported).
+          Example:  https://hianime.ad/watch/naruto/ep-1 to 10
+          If blank, uses input_urls_list.txt from the repo.
+        required: false
+        type: string
+
+      no_streams:
+        description: 'Skip m3u8 resolution (embed URLs only — much faster)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+      delay:
+        description: 'Seconds to wait between episode requests (default: 1.0)'
+        required: false
+        default: '1.0'
+        type: string
+
+# Only one scrape run at a time — prevents two jobs racing on the same files
+concurrency:
+  group: hianime-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340       # just under GitHub's 6-hour job limit
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SCRAPE_TOKEN }}
+          # Fetch full history so git push works cleanly
+          fetch-depth: 0
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install --upgrade pip requests
+
+      # ── 3. Decide batch mode ───────────────────────────────────────────────
+      - name: Resolve batch size
+        id: batch
+        run: |
+          # Scheduled runs use first_100; manual runs use chosen value
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "value=first_100" >> "$GITHUB_OUTPUT"
+          else
+            BATCH="${{ github.event.inputs.batch_size }}"
+            [ -z "$BATCH" ] && BATCH="first_100"
+            echo "value=$BATCH" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 4. Check if there is anything to do ───────────────────────────────
+      - name: Check pending URLs
+        id: check
+        run: |
+          # Count pending = total_input_urls - already_processed
+          python3 - <<'PYEOF'
+          import re, sys
+          from pathlib import Path
+
+          input_file     = Path("input_urls_list.txt")
+          processed_file = Path("already_processed_urls_list.txt")
+
+          if not input_file.exists():
+              print("[!] input_urls_list.txt not found — nothing to do")
+              print("pending=0", flush=True)
+              with open("$GITHUB_ENV", "a") as f:
+                  f.write("PENDING_COUNT=0\n")
+              sys.exit(0)
+
+          def expand(line):
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  return []
+              m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-)(\d+)\s+to\s+(\d+)', line, re.I)
+              if m:
+                  return [f"{m.group(1)}{ep}" for ep in range(int(m.group(2)), int(m.group(3))+1)]
+              m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-\d+)', line, re.I)
+              if m:
+                  return [m.group(1)]
+              return []
+
+          all_urls = []
+          seen = set()
+          for raw in input_file.read_text(encoding="utf-8").splitlines():
+              for u in expand(raw):
+                  if u not in seen:
+                      seen.add(u)
+                      all_urls.append(u)
+
+          processed = set()
+          if processed_file.exists():
+              for ln in processed_file.read_text(encoding="utf-8").splitlines():
+                  ln = ln.strip()
+                  if ln and not ln.startswith("#"):
+                      processed.add(ln)
+
+          inline = """${{ github.event.inputs.inline_urls }}""".strip()
+          if inline:
+              # Inline URLs bypass the processed check — they're always fresh
+              pending_count = len(all_urls)   # just show total; scraper handles dedup
+          else:
+              pending_count = len([u for u in all_urls if u not in processed])
+
+          print(f"[+] Total input URLs : {len(all_urls)}")
+          print(f"[+] Already processed: {len(processed)}")
+          print(f"[+] Pending          : {pending_count}")
+
+          with open(f"{__import__('os').environ['GITHUB_OUTPUT']}", "a") as f:
+              f.write(f"pending={pending_count}\n")
+          PYEOF
+
+      # ── 5. Run the scraper ─────────────────────────────────────────────────
+      - name: Run scraper
+        id: scrape
+        if: steps.check.outputs.pending != '0'
+        env:
+          SCRAPE_DELAY: ${{ github.event.inputs.delay || '1.0' }}
+        run: |
+          BATCH="${{ steps.batch.outputs.value }}"
+          NO_STREAMS="${{ github.event.inputs.no_streams }}"
+          INLINE="${{ github.event.inputs.inline_urls }}"
+
+          ARGS="--batch $BATCH --delay ${SCRAPE_DELAY:-1.0}"
+
+          if [ "$NO_STREAMS" = "true" ]; then
+            ARGS="$ARGS --no-streams"
+          fi
+
+          if [ -n "$INLINE" ]; then
+            # Write inline URLs to a temp file and pass via --input
+            echo "$INLINE" > /tmp/inline_urls.txt
+            ARGS="$ARGS --input /tmp/inline_urls.txt"
+          fi
+
+          echo "[*] Running: python3 hianime_scraper.py $ARGS"
+          echo ""
+
+          # Capture exit code without letting it abort the whole step
+          set +e
+          python3 hianime_scraper.py $ARGS
+          EXIT_CODE=$?
+          set -e
+
+          echo ""
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          if [ -f run_summary.json ]; then
+            echo "=== run_summary.json ==="
+            cat run_summary.json
+            echo ""
+            REMAINING=$(python3 -c "import json; d=json.load(open('run_summary.json')); print(d.get('remaining',0))")
+            echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
+          else
+            echo "remaining=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 6. Commit results back to the repo ────────────────────────────────
+      - name: Commit and push results
+        if: steps.check.outputs.pending != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage all output files
+          git add hianime_streams_list*.json  2>/dev/null || true
+          git add already_processed_urls_list.txt 2>/dev/null || true
+          git add run_summary.json 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "[*] No changes to commit"
+          else
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+            SUMMARY=""
+            if [ -f run_summary.json ]; then
+              OK=$(python3      -c "import json; print(json.load(open('run_summary.json')).get('ok',      0))")
+              ERRORS=$(python3  -c "import json; print(json.load(open('run_summary.json')).get('errors',  0))")
+              TOTAL=$(python3   -c "import json; print(json.load(open('run_summary.json')).get('total',   0))")
+              SUMMARY=" | ${OK} OK / ${ERRORS} err / ${TOTAL} total"
+            fi
+            git commit -m "scrape: ${TIMESTAMP}${SUMMARY}"
+            git push
+            echo "[✓] Results committed and pushed"
+          fi
+
+      # ── 7. Auto-trigger next batch if URLs remain ─────────────────────────
+      - name: Trigger next batch
+        if: |
+          steps.check.outputs.pending != '0' &&
+          steps.scrape.outputs.remaining != '0' &&
+          steps.scrape.outputs.remaining != ''
+        env:
+          GH_TOKEN: ${{ secrets.SCRAPE_TOKEN }}
+        run: |
+          REMAINING="${{ steps.scrape.outputs.remaining }}"
+          BATCH="${{ steps.batch.outputs.value }}"
+
+          echo "[*] $REMAINING URL(s) still pending."
+          echo "[*] Waiting 5 minutes, then triggering next batch..."
+          sleep 300
+
+          gh workflow run scrape.yml \
+            --repo "${{ github.repository }}" \
+            --ref  "${{ github.ref_name }}" \
+            --field batch_size="$BATCH" \
+            --field no_streams="${{ github.event.inputs.no_streams || 'false' }}" \
+            --field delay="${{ github.event.inputs.delay || '1.0' }}" \
+            && echo "[✓] Next batch queued." \
+            || echo "[!] Could not self-trigger — the 30-min cron will resume the chain."
+
+      # ── 8. Final status ────────────────────────────────────────────────────
+      - name: Print final status
+        if: always()
+        run: |
+          echo ""
+          echo "══════════════════════════════════════════════"
+          if [ -f run_summary.json ]; then
+            python3 - <<'PYEOF'
+          import json
+          d = json.load(open("run_summary.json"))
+          print(f"  OK       : {d.get('ok', 0)}")
+          print(f"  Errors   : {d.get('errors', 0)}")
+          print(f"  Total    : {d.get('total', 0)}")
+          print(f"  Remaining: {d.get('remaining', 0)}")
+          print(f"  Outputs  : {', '.join(d.get('outputs', []))}")
+          print(f"  At       : {d.get('timestamp','?')}")
+          PYEOF
+          else
+            echo "  No run_summary.json (scraper may have been skipped)"
+          fi
+          echo "══════════════════════════════════════════════"
