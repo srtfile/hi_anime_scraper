@@ -1,10 +1,10 @@
 {
-  "ok": 721,
+  "ok": 100,
   "errors": 0,
-  "total": 721,
-  "remaining": 0,
+  "total": 100,
+  "remaining": 1060,
   "outputs": [
     "hianime_streams_list.json"
   ],
-  "timestamp": "2026-07-27T12:22:21+00:00"
+  "timestamp": "2026-07-27T14:05:32+00:00"
 }
