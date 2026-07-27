@@ -18,8 +18,13 @@ Output record format:
     "hsub_streamhg_embed_url_ep_1": "https://otakuhg.site/e/…",
     "hsub_earnvids_embed_url_ep_1": "https://otakuvid.online/embed/…",
     "sub_streamhg_embed_url_ep_1":  "https://otakuhg.site/e/…",
+    "sub_someother_embed_url_ep_1": "https://somenewsite.com/…",   ← catch-all
     ...
   }
+
+  All data-video="…" URLs found on the page are captured — including any
+  new or unknown streaming hosts — via a catch-all pass after the known
+  domain patterns. Keys for unknown hosts are derived from their domain name.
 
 Usage:
   python hianime_scraper.py --batch 50
@@ -278,13 +283,21 @@ def _label_key(label: str) -> str:
 
 def parse_episode_page(ep_url: str) -> dict:
     """
-    Fetch the episode page and return a flat dict of all embed URLs.
+    Fetch the episode page and return a flat dict of ALL embed URLs found.
+
+    Strategy (in order, per server-type block):
+    1. vibeplayer.site embeds  → key = "{server_type}_{label}"
+    2. Known external domains  → key = "{server_type}_{label_name}"
+       (otakuhg.site=streamhg, otakuvid.online=earnvids, playmogo.com=doodstream)
+    3. Catch-all for ANY other data-video="https://…" URL not yet captured
+       → key = "{server_type}_{sanitised_domain}[_{n}]"
 
     Return format:
     {
       "hsub_streamhg": "https://…",
       "hsub_earnvids": "https://…",
       "sub_hd1":       "https://…",
+      "sub_someother": "https://…",   ← previously missed
       …
     }
     """
@@ -294,7 +307,24 @@ def parse_episode_page(ep_url: str) -> dict:
 
     flat: dict[str, str] = {}
 
-    # Primary server blocks (vibeplayer + external all appear here)
+    # Known external domain → short label token
+    _KNOWN_DOMAINS: list[tuple[str, str]] = [
+        (r'otakuhg\.site',    "streamhg"),
+        (r'otakuvid\.online', "earnvids"),
+        (r'playmogo\.com',    "doodstream"),
+    ]
+
+    def _domain_label(url: str) -> str:
+        """Derive a short key token from any URL's domain."""
+        m = re.search(r'https?://(?:www\.)?([^/]+)', url)
+        if not m:
+            return "unknown"
+        domain = m.group(1)
+        # Strip common TLD noise to keep keys short
+        domain = re.sub(r'\.(com|net|org|site|online|live|tv|io|cc|me)$', '', domain)
+        return re.sub(r'[^a-z0-9]+', '_', domain.lower()).strip('_')
+
+    # Primary server blocks
     blocks = re.findall(
         r'<div class="ps__-list server-items" data-id="([^"]+)">(.*?)</div>\s*<div class="clearfix',
         html, re.DOTALL,
@@ -302,7 +332,7 @@ def parse_episode_page(ep_url: str) -> dict:
     for server_type, block_html in blocks:
         st = server_type.lower().strip()
 
-        # vibeplayer.site embeds
+        # ── 1. vibeplayer.site embeds (carry an explicit label in the element) ──
         for embed_full, label in re.findall(
             r'data-video="(https://vibeplayer\.site/[^"]+)"[^>]*>([^<]+)<', block_html
         ):
@@ -310,18 +340,34 @@ def parse_episode_page(ep_url: str) -> dict:
             key = f"{st}_{_label_key(label.strip())}"
             flat[key] = embed_url
 
-        # External players: StreamHG / Earnvids / Doodstream
-        for domain_pat, label_name in [
-            (r'otakuhg\.site',       "streamhg"),
-            (r'otakuvid\.online',    "earnvids"),
-            (r'playmogo\.com',       "doodstream"),
-        ]:
+        # ── 2. Known external players ──────────────────────────────────────────
+        for domain_pat, label_name in _KNOWN_DOMAINS:
             for m in re.finditer(
                 r'data-video="(https://' + domain_pat + r'[^"]+)"',
                 block_html,
             ):
                 key = f"{st}_{label_name}"
                 flat.setdefault(key, m.group(1).split("?")[0])
+
+        # ── 3. Catch-all: every other data-video URL not yet captured ──────────
+        already_captured = set(flat.values())
+        for m in re.finditer(r'data-video="(https?://[^"]+)"', block_html):
+            url_raw = m.group(1).split("?")[0]
+            if url_raw in already_captured:
+                continue
+            # Skip vibeplayer (handled above) and known domains (handled above)
+            if re.search(r'vibeplayer\.site|otakuhg\.site|otakuvid\.online|playmogo\.com', url_raw):
+                continue
+            base_key = f"{st}_{_domain_label(url_raw)}"
+            # Disambiguate if the same server-type already has a URL from this domain
+            if base_key not in flat:
+                flat[base_key] = url_raw
+            else:
+                n = 2
+                while f"{base_key}_{n}" in flat:
+                    n += 1
+                flat[f"{base_key}_{n}"] = url_raw
+            already_captured.add(url_raw)
 
     return flat
 
