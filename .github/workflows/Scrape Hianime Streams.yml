@@ -2,8 +2,8 @@ name: Scrape Hianime Streams
 
 on:
   # ── Scheduled: auto-resume every 30 min if URLs are still pending ────────
-  schedule:
-    - cron: '*/30 * * * *'
+ # schedule:
+   # - cron: '*/30 * * * *'
 
   # ── Manual trigger with full control ─────────────────────────────────────
   workflow_dispatch:
