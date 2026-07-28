@@ -88,22 +88,35 @@ session.headers.update({
 # INPUT PARSING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def expand_line(line: str) -> list[str]:
+def expand_line(line: str) -> list[tuple[str, int | None]]:
     """
-    Expand one input line into a list of fully-formed episode URLs.
+    Expand one input line into a list of (episode_url, mal_id) tuples.
 
     Supported formats
     ─────────────────
-    https://hianime.ad/watch/one-piece/ep-1 to 220   → 220 URLs
-    https://hianime.ad/watch/naruto-shippuden/ep-50  → 1 URL
+    https://hianime.ad/watch/one-piece/ep-1 to 220 | MAL_ID: 21   → 220 tuples
+    https://hianime.ad/watch/naruto-shippuden/ep-50                → 1 tuple
+    1. https://hianime.ad/watch/summer/ep-1 to 2 | MAL_ID: 1692 | https://…
     """
     line = line.strip()
     if not line or line.startswith("#"):
         return []
 
+    # Strip leading list number (e.g. "1. " or "42. ")
+    line = re.sub(r'^\d+\.\s*', '', line)
+
+    # Extract optional MAL_ID anywhere after a pipe
+    mal_id: int | None = None
+    mal_m = re.search(r'\|\s*MAL_ID\s*:\s*(\d+)', line, re.IGNORECASE)
+    if mal_m:
+        mal_id = int(mal_m.group(1))
+
+    # Strip everything from the first pipe onward so URL matching is clean
+    url_part = line.split('|')[0].strip()
+
     m = re.match(
         r'(https://hianime\.ad/watch/[^/]+/ep-)(\d+)\s+to\s+(\d+)',
-        line, re.IGNORECASE,
+        url_part, re.IGNORECASE,
     )
     if m:
         prefix = m.group(1)
@@ -111,36 +124,38 @@ def expand_line(line: str) -> list[str]:
         if start > end:
             print(f"  [!] Bad range (start > end), skipping: {line}", flush=True)
             return []
-        return [f"{prefix}{ep}" for ep in range(start, end + 1)]
+        return [(f"{prefix}{ep}", mal_id) for ep in range(start, end + 1)]
 
-    m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-\d+)', line, re.IGNORECASE)
+    m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-\d+)', url_part, re.IGNORECASE)
     if m:
-        return [m.group(1)]
+        return [(m.group(1), mal_id)]
 
     print(f"  [?] Unrecognised line, skipping: {line}", flush=True)
     return []
 
 
-def parse_input_file(path: Path) -> list[str]:
+def parse_input_file(path: Path) -> list[tuple[str, int | None]]:
     if not path.exists():
         sys.exit(f"[!] Input file not found: {path}\n    Create it with one URL or range per line.")
-    urls, seen = [], set()
+    entries: list[tuple[str, int | None]] = []
+    seen: set[str] = set()
     for raw in path.read_text(encoding="utf-8").splitlines():
-        for u in expand_line(raw):
-            if u not in seen:
-                seen.add(u)
-                urls.append(u)
-    return urls
+        for url, mal_id in expand_line(raw):
+            if url not in seen:
+                seen.add(url)
+                entries.append((url, mal_id))
+    return entries
 
 
-def parse_inline_urls(text: str) -> list[str]:
-    urls, seen = [], set()
+def parse_inline_urls(text: str) -> list[tuple[str, int | None]]:
+    entries: list[tuple[str, int | None]] = []
+    seen: set[str] = set()
     for part in re.split(r'[,\n]', text):
-        for u in expand_line(part.strip()):
-            if u not in seen:
-                seen.add(u)
-                urls.append(u)
-    return urls
+        for url, mal_id in expand_line(part.strip()):
+            if url not in seen:
+                seen.add(url)
+                entries.append((url, mal_id))
+    return entries
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -382,14 +397,15 @@ def parse_episode_page(ep_url: str) -> dict:
 # SINGLE EPISODE SCRAPE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def scrape_episode(ep_url: str) -> dict:
+def scrape_episode(ep_url: str, mal_id: int | None = None) -> dict:
     """
     Scrape one episode and return a flat record dict.
 
     Output shape:
     {
       "serial_no":                    1,
-      "mal_id/anilist_id/tmdb_id":    null,
+      "mal_id/anilist_id/tmdb_id":    1692,
+      "episode_no":                   1,
       "episode_url":                  "https://hianime.ad/watch/one-piece/ep-1",
       "anime_name":                   "One Piece",
       "hsub_streamhg_embed_url_ep_1": "https://otakuhg.site/e/…",
@@ -406,10 +422,11 @@ def scrape_episode(ep_url: str) -> dict:
     anime    = slug_to_anime_name(slug) if slug else "Unknown"
 
     record: dict = {
-        "serial_no":              _SERIAL,
-        "mal_id/anilist_id/tmdb_id": None,   # fill in manually or via API later
-        "episode_url":            ep_url,
-        "anime_name":             anime,
+        "serial_no":                 _SERIAL,
+        "mal_id/anilist_id/tmdb_id": mal_id,   # populated from MAL_ID in input file
+        "episode_no":                ep_num,
+        "episode_url":               ep_url,
+        "anime_name":                anime,
     }
 
     try:
@@ -560,7 +577,7 @@ def sort_output_files(output_dir: Path, stem: str, max_bytes: int) -> list[Path]
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run(
-    all_urls:       list[str],
+    all_entries:    list[tuple[str, int | None]],
     processed_path: Path,
     output_dir:     Path,
     batch:          str,
@@ -571,16 +588,16 @@ def run(
     print("=" * 65, flush=True)
     print(flush=True)
 
-    if not all_urls:
+    if not all_entries:
         print("[!] No URLs to process.", flush=True)
         return 1
 
-    print(f"[*] {len(all_urls)} total URLs after expansion", flush=True)
+    print(f"[*] {len(all_entries)} total URLs after expansion", flush=True)
 
     processed = load_processed(processed_path)
-    pending   = [u for u in all_urls if u not in processed]
+    pending   = [(u, mid) for u, mid in all_entries if u not in processed]
     print(
-        f"[*] {len(all_urls) - len(pending)} already processed, "
+        f"[*] {len(all_entries) - len(pending)} already processed, "
         f"{len(pending)} pending",
         flush=True,
     )
@@ -589,8 +606,13 @@ def run(
         print("[✓] All URLs already processed. Nothing to do.", flush=True)
         return 0
 
-    selected  = select_batch(pending, batch)
-    remaining = len(pending) - len(selected)
+    # select_batch works on plain URL list; preserve mal_id mapping
+    pending_urls = [u for u, _ in pending]
+    mal_id_map   = {u: mid for u, mid in pending}
+
+    selected_urls = select_batch(pending_urls, batch)
+    selected      = [(u, mal_id_map[u]) for u in selected_urls]
+    remaining     = len(pending) - len(selected)
     print(f"[*] Batch '{batch}': running {len(selected)} URL(s)", flush=True)
     if remaining > 0:
         print(f"[*] {remaining} URL(s) deferred to next run", flush=True)
@@ -601,13 +623,13 @@ def run(
     er_count = 0
     total    = len(selected)
 
-    for i, ep_url in enumerate(selected, 1):
+    for i, (ep_url, mal_id) in enumerate(selected, 1):
         slug   = get_slug(ep_url)  or "?"
         ep_num = get_ep_num(ep_url) or "?"
         pct    = i / total * 100
-        print(f"[{i}/{total}  {pct:.1f}%]  {slug}  ep-{ep_num}", flush=True)
+        print(f"[{i}/{total}  {pct:.1f}%]  {slug}  ep-{ep_num}  (MAL:{mal_id})", flush=True)
 
-        record = scrape_episode(ep_url)
+        record = scrape_episode(ep_url, mal_id)
         out.add(record)
         mark_processed(processed_path, ep_url)
 
@@ -689,10 +711,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    all_urls = parse_inline_urls(args.url) if args.url else parse_input_file(Path(args.input))
+    all_entries = parse_inline_urls(args.url) if args.url else parse_input_file(Path(args.input))
 
     sys.exit(run(
-        all_urls       = all_urls,
+        all_entries    = all_entries,
         processed_path = PROCESSED_FILE,
         output_dir     = BASE_DIR,
         batch          = args.batch,
