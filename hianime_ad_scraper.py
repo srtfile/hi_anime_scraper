@@ -57,7 +57,7 @@ except ImportError:
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 BASE_DIR         = Path(__file__).parent
-INPUT_FILE       = BASE_DIR / "input_urls_list.txt"
+INPUT_FILE       = BASE_DIR / "input_urls_list_maker_with_MAL_and_myanimelist_url.txt"
 PROCESSED_FILE   = BASE_DIR / "already_processed_urls_list.txt"
 OUTPUT_STEM      = "hianime_streams_list"
 MAX_OUTPUT_BYTES = 3 * 1024 * 1024          # 3 MB hard cap per file
@@ -670,7 +670,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--input", default=str(INPUT_FILE),
-        help="Input file with URL list (default: input_urls_list.txt)",
+        help="Input file with URL list (default: input_urls_list_maker_with_MAL_and_myanimelist_url.txt)",
     )
     parser.add_argument(
         "--url",
