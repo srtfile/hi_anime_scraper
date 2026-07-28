@@ -1,2 +1,8 @@
 ID 660 | Invalid episodes | https://hianime.ad/anime/astro-boy | https://myanimelist.net/anime/2747 |  | TV
 ID 923 | Invalid episodes | https://hianime.ad/anime/beyond-times-gaze | https://myanimelist.net/anime/44387 |  | ONA
+ID 1101 | Invalid episodes | https://hianime.ad/anime/boonie-bears-homeward-journey | https://myanimelist.net/anime/37097 |  | Special
+ID 1338 | Invalid episodes | https://hianime.ad/anime/cheongchun-blossom-uriui-bom | https://myanimelist.net/anime/63964 |  | TV
+ID 1343 | Invalid episodes | https://hianime.ad/anime/chibi-godzilla-raids-again-season-3 | https://myanimelist.net/anime/58351 |  | TV_SHORT
+ID 1567 | Invalid episodes | https://hianime.ad/anime/crying-freeman | https://myanimelist.net/anime/1153 |  | OVA
+ID 1699 | Invalid episodes | https://hianime.ad/anime/delinquent-detective | https://myanimelist.net/anime/2726 |  | OVA
+ID 1859 | Invalid episodes | https://hianime.ad/anime/do-you-like-big-girls | https://myanimelist.net/anime/56734 |  | TV_SHORT
