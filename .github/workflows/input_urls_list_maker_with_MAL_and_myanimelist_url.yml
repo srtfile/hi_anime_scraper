@@ -1,0 +1,33 @@
+name: Generate Anime Output
+
+on:
+  workflow_dispatch:   # manual run button
+  schedule:
+    - cron: "0 0 * * *"   # runs daily (UTC)
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run script
+        run: python script.py
+
+      - name: Upload output files
+        uses: actions/upload-artifact@v4
+        with:
+          name: results
+          path: |
+            final_output.txt
+            skipped_items.txt
