@@ -1,1 +1,1 @@
-https://github.com/srtfile/hianime.ad  this repos produce page 1 to 262 or more page urls list and save into that https://raw.githubusercontent.com/srtfile/hianime.ad/refs/heads/main/data/anime_urls.json
+[https://github.com/srtfile/hianime.ad  this repos produce page 1 to 262 or more page urls list and save into that https://raw.githubusercontent.com/srtfile/hianime.ad/refs/heads/main/data/anime_urls.json]
