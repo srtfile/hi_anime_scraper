@@ -27,7 +27,7 @@ on:
         description: |
           Optional: paste URLs directly (one per line, ranges supported).
           Example:  https://hianime.ad/watch/naruto/ep-1 to 10
-          If blank, uses input_urls_list.txt from the repo.
+          If blank, uses input_urls_list_maker_with_MAL_and_myanimelist_url.txt from the repo.
         required: false
         type: string
 
