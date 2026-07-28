@@ -2,7 +2,7 @@ import requests
 import re
 
 URL = "https://raw.githubusercontent.com/srtfile/hianime_mal_id_verification/refs/heads/main/data/anime_data.json"
-OUTPUT_FILE = "input_urls_list_maker_with_MAL_and_myanimelist_url"
+OUTPUT_FILE = "input_urls_list_maker_with_MAL_and_myanimelist_url.txt"
 ERROR_FILE = "input_urls_list_maker_with_MAL_and_myanimelist_url_skipped_items.txt"
 
 def fetch_data(url):
