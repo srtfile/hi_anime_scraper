@@ -1,9 +1,9 @@
-name: Generate Anime Output
+name: Run Anime URL Generator
 
 on:
-  workflow_dispatch:   # manual run button
-  schedule:
-    - cron: "0 0 * * *"   # runs daily (UTC)
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   run-script:
@@ -13,21 +13,26 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests
+      - name: Install dependencies (if any)
+        run: |
+          pip install requests
 
       - name: Run script
-        run: python input_urls_list_maker_with_MAL_and_myanimelist_url.py
+        run: |
+          python input_urls_list_maker_with_MAL_and_myanimelist_url.py
 
-      - name: Upload output files
-        uses: actions/upload-artifact@v4
-        with:
-          name: results
-          path: |
-            input_urls_list_maker_with_MAL_and_myanimelist_url.txt
-            input_urls_list_maker_with_MAL_and_myanimelist_url_skipped_items.txt
+      - name: Commit and push output
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "github-actions"
+
+          git add input_urls_list_maker_with_MAL_and_myanimelist_url.txt input_urls_list_maker_with_MAL_and_myanimelist_url_skipped_items.txt || true
+
+          git commit -m "Auto update generated output" || echo "No changes to commit"
+
+          git push
