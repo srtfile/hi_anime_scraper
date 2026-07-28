@@ -97,10 +97,14 @@ jobs:
               line = line.strip()
               if not line or line.startswith("#"):
                   return []
-              m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-)(\d+)\s+to\s+(\d+)', line, re.I)
+              # Strip leading list number (e.g. "1. ")
+              line = re.sub(r'^\d+\.\s*', '', line)
+              # Strip MAL_ID / myanimelist pipe suffixes — only keep URL part
+              url_part = line.split('|')[0].strip()
+              m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-)(\d+)\s+to\s+(\d+)', url_part, re.I)
               if m:
                   return [f"{m.group(1)}{ep}" for ep in range(int(m.group(2)), int(m.group(3))+1)]
-              m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-\d+)', line, re.I)
+              m = re.match(r'(https://hianime\.ad/watch/[^/]+/ep-\d+)', url_part, re.I)
               if m:
                   return [m.group(1)]
               return []
