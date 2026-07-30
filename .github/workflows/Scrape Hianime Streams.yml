@@ -11,7 +11,7 @@ on:
       batch_size:
         description: |
           How many pending URLs to process this run.
-            first_10 / first_50 / first_100 / first_10000 / half / all
+            first_10 / first_50 / first_100 / first_15000 / half / all
         required: false
         default: 'first_100'
         type: choice
@@ -19,7 +19,7 @@ on:
           - first_10
           - first_50
           - first_100
-          - first_10000
+          - first_15000
           - half
           - all
 
