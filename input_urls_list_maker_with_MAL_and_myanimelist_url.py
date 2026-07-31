@@ -1,7 +1,7 @@
 import requests
 import re
 
-URL = "https://raw.githubusercontent.com/srtfile/hianime_mal_id_verify_1-main/refs/heads/main/data/anime_data_part3.json"
+URL = "https://raw.githubusercontent.com/srtfile/hianime_mal_id_verify_1-main/refs/heads/main/data/anime_data_part2.json"
 OUTPUT_FILE = "input_urls_list_maker_with_MAL_and_myanimelist_url.txt"
 ERROR_FILE = "input_urls_list_maker_with_MAL_and_myanimelist_url_skipped_items.txt"
 
