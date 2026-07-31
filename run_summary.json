@@ -1,8 +1,8 @@
 {
-  "ok": 9974,
-  "errors": 26,
+  "ok": 9989,
+  "errors": 11,
   "total": 10000,
-  "remaining": 17206,
+  "remaining": 7206,
   "outputs": [
     "hianime_streams_list.json",
     "hianime_streams_list_2.json",
@@ -15,7 +15,10 @@
     "hianime_streams_list_9.json",
     "hianime_streams_list_10.json",
     "hianime_streams_list_11.json",
-    "hianime_streams_list_12.json"
+    "hianime_streams_list_12.json",
+    "hianime_streams_list_13.json",
+    "hianime_streams_list_14.json",
+    "hianime_streams_list_15.json"
   ],
-  "timestamp": "2026-07-30T20:52:12+00:00"
+  "timestamp": "2026-07-31T01:37:32+00:00"
 }
